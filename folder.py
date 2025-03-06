@@ -5,22 +5,28 @@ import webbrowser
 import requests
 from urllib.parse import urlparse
 from bs4 import BeautifulSoup
+import aiohttp
+import asyncio
+import platform
 
-def save_page_as_html(url, folder):
+# Добавляем проверку для Windows
+if platform.system() == 'Windows':
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+async def save_page_as_html(session, url, folder):
     try:
-        # Извлекаем домен из URL для имени файла
         domain = urlparse(url).netloc
         if not domain:
             domain = url.split('//')[1].split('/')[0]
         
-        # Создаем имя файла из домена
         filename = f"{domain}.html"
         filepath = os.path.join(folder, filename)
         
-        response = requests.get(url)
-        with open(filepath, 'w', encoding='utf-8') as f:
-            f.write(response.text)
-        return filepath  # Возвращаем путь к файлу
+        async with session.get(url) as response:
+            content = await response.text()
+            with open(filepath, 'w', encoding='utf-8') as f:
+                f.write(content)
+        return filepath
     except Exception as e:
         print("Error saving HTML: " + str(e))
         return None
@@ -72,32 +78,59 @@ def check_html_content(filepath):
         print("Error checking content: " + str(e))
         return True  # В случае ошибки всё равно открываем
 
-def main():
+async def process_urls(urls, folder_name, installer_folder):
+    url_results = []
+    
+    timeout = aiohttp.ClientTimeout(total=30)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        tasks = []
+        for name, base_url in urls.items():
+            parts = base_url.split('%s')
+            if len(parts) > 1:
+                search_url = folder_name.join(parts)
+            else:
+                parts = base_url.split('%S')
+                if len(parts) > 1:
+                    search_url = folder_name.join(parts)
+                else:
+                    search_url = base_url
+                    
+            print("Processing: " + search_url)
+            tasks.append(save_page_as_html(session, search_url, installer_folder))
+            url_results.append((name, search_url))
+        
+        saved_files = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        for (name, url), filepath in zip(url_results, saved_files):
+            if isinstance(filepath, str) and os.path.exists(filepath):
+                print("Successfully saved page for " + name)
+                if check_html_content(filepath):
+                    webbrowser.open(url)
+                else:
+                    print(f"Not opening {name} - no results found")
+            else:
+                print(f"Failed to save page for {name}")
+
+async def async_main():
     try:
-        # Get TC current directory from command line argument and clean it
         tc_path = sys.argv[1] if len(sys.argv) > 1 else os.getcwd()
         
-        # Remove trailing drive letter if it exists
         if tc_path.endswith('D') or tc_path.endswith('C'):
             tc_path = tc_path[:-1]
         
-        # Get the last folder name from the path
         folder_name = os.path.basename(tc_path.rstrip('\\'))
         
         print("Working in directory: " + tc_path)
         print("Selected folder: " + folder_name)
 
-        # Verify the exact path exists
         if not os.path.exists(tc_path):
             print("Error: Directory does not exist: " + tc_path)
             return
             
-        # Check write permissions
         if not os.access(tc_path, os.W_OK):
             print("No write permissions in: " + tc_path)
             return
             
-        # Create Installer folder
         installer_folder = os.path.join(tc_path, "Installer")
         try:
             os.makedirs(installer_folder, exist_ok=True)
@@ -107,31 +140,7 @@ def main():
                 script_dir = os.path.dirname(os.path.realpath(__file__))
                 urls = read_urls_from_ini(script_dir)
                 if urls:
-                    for name, base_url in urls.items():
-                        parts = base_url.split('%s')
-                        if len(parts) > 1:
-                            search_url = folder_name.join(parts)
-                        else:
-                            parts = base_url.split('%S')
-                            if len(parts) > 1:
-                                search_url = folder_name.join(parts)
-                            else:
-                                search_url = base_url
-                            
-                        print("Processing: " + search_url)
-                        
-                        # Сначала всегда сохраняем страницу
-                        saved_filepath = save_page_as_html(search_url, installer_folder)
-                        if saved_filepath:
-                            print("Successfully saved page for " + name)
-                            
-                            # Потом проверяем и решаем, открывать ли её
-                            if check_html_content(saved_filepath):
-                                webbrowser.open(search_url)
-                            else:
-                                print(f"Not opening {name} - no results found")
-                        else:
-                            print("Failed to save page for " + name)
+                    await process_urls(urls, folder_name, installer_folder)
             else:
                 print("Could not determine folder name from path.")
                     
@@ -141,6 +150,13 @@ def main():
             
     except Exception as e:
         print("Error: " + str(e))
+
+def main():
+    try:
+        if platform.system() == 'Windows':
+            # Для Windows используем специальный запуск
+            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+        asyncio.run(async_main())
     finally:
         input("Press Enter to exit...")
 
